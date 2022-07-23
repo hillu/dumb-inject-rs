@@ -147,11 +147,8 @@ fn do_inject(params: Vec<&str>) -> Result<(),Box<dyn std::error::Error>> {
                            null_mut())
     };
     
-    /* FIXME: This may be more fugly than it needs to be. */
     let ll_addr_fnptr = 
-        (&(ll_addr as *const fn())
-         as *const *const fn())
-        as *const extern "system" fn(*mut VOID) -> DWORD;
+	(&( ll_addr as *const fn() ) as *const _) as *const _;
 
     let _thread_handle = unsafe {
         CreateRemoteThread(proc_handle,
@@ -274,11 +271,9 @@ fn do_unload(params: Vec<&str>) -> Result<(),Box<dyn std::error::Error>> {
 			      handle as u64, module_name.to_string_lossy()));
 
             let fl_addr = resolve_addr("kernel32.dll", "FreeLibrary")?;
-	    /* FIXME: This may be more fugly than it needs to be. */
             let fl_addr_fnptr =
-                (&(fl_addr as *const fn())
-                 as *const *const fn())
-                as *const extern "system" fn(*mut VOID) -> DWORD;
+		(&( fl_addr as *const fn() ) as *const _) as *const _;
+
             let _thread_handle = unsafe {
                 CreateRemoteThread(proc_handle,
                                    null_mut(),
