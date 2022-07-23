@@ -12,6 +12,7 @@ use winapi::shared::{minwindef::*,
 use winapi::um::{errhandlingapi::*,
                  libloaderapi::*,
                  processthreadsapi::*,
+                 psapi::*,
                  winbase::*,
                  winuser::*,
                  winnt::{*,INT},
@@ -76,7 +77,7 @@ fn open_process(pid: u32) -> Result<HANDLE,Box<dyn std::error::Error>> {
         OpenProcess(
             PROCESS_ALL_ACCESS,
             FALSE,
-            pid as DWORD
+            pid as _
         )
     };
     if h != null_mut() {
@@ -89,6 +90,10 @@ fn open_process(pid: u32) -> Result<HANDLE,Box<dyn std::error::Error>> {
 /// Produce formatted message based on GetLastError
 fn get_last_error_string() -> String {
     let r = unsafe { GetLastError() };
+    format_error(r)
+}
+
+fn format_error(r: DWORD) -> String {
     let mut msg = [0 as CHAR; 256];
     unsafe {
         FormatMessageA(
@@ -100,7 +105,7 @@ fn get_last_error_string() -> String {
             256,
             null_mut())
     };
-    unsafe { CStr::from_ptr(msg.as_ptr()) }.to_string_lossy().to_string()
+    unsafe { CStr::from_ptr(msg.as_ptr()) } .to_string_lossy().to_string()
 }
 
 /// Resolve address of proc in module.
@@ -137,7 +142,7 @@ fn do_inject(params: Vec<&str>) -> Result<(),Box<dyn std::error::Error>> {
     unsafe {
         WriteProcessMemory(proc_handle,
                            dllname_remote_addr,
-                           DLL_NAME.as_ref().unwrap().as_ptr() as *const VOID,
+                           DLL_NAME.as_ref().unwrap().as_ptr().cast(),
                            MAX_PATH,
                            null_mut())
     };
@@ -153,7 +158,7 @@ fn do_inject(params: Vec<&str>) -> Result<(),Box<dyn std::error::Error>> {
                            null_mut(),
                            0,
                            Some(*ll_addr_fnptr),
-                           dllname_remote_addr as *mut VOID,
+                           dllname_remote_addr,
                            0,
                            null_mut())
     };
@@ -166,6 +171,135 @@ fn do_inject(params: Vec<&str>) -> Result<(),Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn do_enum(params: Vec<&str>) -> Result<(),Box<dyn std::error::Error>> {
+    if params.len() != 1 {
+        return Err("usage: <pid>".into());
+    }
+    let pid: u32 = params[0].parse().map_err(|e|format!("parse pid: {}", e))?;
+    get_sedebug_priv().map_err(|e|format!("AdjustPRivileges: {}", e))?;
+    let proc_handle = open_process(pid).map_err(|e|format!("OpenProcess: {}: {}", pid, e))?;
+
+    let module_handles =
+    {
+        let mut buf: Vec<HMODULE> = Vec::new();
+        buf.resize(8, null_mut());
+        let mut needed: DWORD = 0;
+        loop {
+            match unsafe {
+                EnumProcessModules(
+                    proc_handle,
+                    buf.as_mut_ptr(),
+                    (buf.len() * std::mem::size_of::<HMODULE>()) as _,
+                    &mut needed
+                )
+            } {
+                TRUE => {
+                    let prev_len = buf.len();
+                    buf.resize(needed as usize / std::mem::size_of::<HMODULE>(), null_mut());
+                    if (needed as usize) / std::mem::size_of::<HMODULE>() <= prev_len {
+                        break;
+                    }
+                },
+                _ => return Err(get_last_error_string().into()),
+            }
+        }
+        buf
+    };
+
+    let mut msg = "Modules:\n\n".to_string();
+    for handle in module_handles {
+        let mut buf = [0 as CHAR; MAX_PATH];
+        unsafe {
+            GetModuleFileNameExA(proc_handle,
+				 handle,
+				 buf.as_mut_ptr(),
+				 MAX_PATH as _)
+        };
+	msg += &format!("{:08x} {}\n",
+			handle as u64,
+			&unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy());
+    }
+
+    info_msg(&msg);
+
+    Ok(())
+}
+
+fn do_unload(params: Vec<&str>) -> Result<(),Box<dyn std::error::Error>> {
+    if params.len() != 1 {
+        return Err("usage: <pid>".into());
+    }
+    let pid: u32 = params[0].parse().map_err(|e|format!("parse pid: {}", e))?;
+    get_sedebug_priv().map_err(|e|format!("AdjustPRivileges: {}", e))?;
+    let proc_handle = open_process(pid).map_err(|e|format!("OpenProcess: {}: {}", pid, e))?;
+
+    let module_handles =
+    {
+        let mut buf: Vec<HMODULE> = Vec::new();
+        buf.resize(8, null_mut());
+        let mut needed: DWORD = 0;
+        loop {
+            match unsafe {
+                EnumProcessModules(
+                    proc_handle,
+                    buf.as_mut_ptr(),
+                    (buf.len() * std::mem::size_of::<HMODULE>()) as _,
+                    &mut needed
+                )
+            } {
+                TRUE => {
+                    let prev_len = buf.len();
+                    buf.resize(needed as usize / std::mem::size_of::<HMODULE>(), null_mut());
+                    if (needed as usize) / std::mem::size_of::<HMODULE>() <= prev_len {
+                        break;
+                    }
+                },
+                _ => return Err(get_last_error_string().into()),
+            }
+        }
+        buf
+    };
+
+    let dll_name = unsafe { CStr::from_ptr(DLL_NAME.as_ref().unwrap().as_ptr()) };
+    let mut found = false;
+
+    for handle in module_handles {
+        let mut buf = [0 as CHAR; MAX_PATH];
+        unsafe {
+            GetModuleFileNameExA(proc_handle, handle, buf.as_mut_ptr(), MAX_PATH as _)
+        };
+        let module_name = unsafe { CStr::from_ptr(buf.as_ptr()) };
+        if module_name == dll_name {
+            info_msg(&format!("Unloading DLL: \n{:08x} {}",
+			      handle as u64, module_name.to_string_lossy()));
+
+            let fl_addr = resolve_addr("kernel32.dll", "FreeLibrary")?;
+	    /* FIXME: This may be more fugly than it needs to be. */
+            let fl_addr_fnptr =
+                (&(fl_addr as *const fn())
+                 as *const *const fn())
+                as *const extern "system" fn(*mut VOID) -> DWORD;
+            let _thread_handle = unsafe {
+                CreateRemoteThread(proc_handle,
+                                   null_mut(),
+                                   0,
+                                   Some(*fl_addr_fnptr),
+                                   handle as _,
+                                   0,
+                                   null_mut())
+            };
+	    found = true;
+            break;
+        }
+    }
+
+    if !found {
+	error_msg("DLL not found in target process");
+    }
+
+    Ok(())
+}
+
 // This function gets called by DllMain if a process other than
 // rundll32 has loaded htis DLL.
 //
@@ -174,8 +308,8 @@ fn do_inject(params: Vec<&str>) -> Result<(),Box<dyn std::error::Error>> {
 //
 // Let's just tell the user that everything went well and provide him
 // with a cmd.exe.
-fn inject_main() {
-    info_msg("injection completed");
+fn on_load() {
+    info_msg("DLL was injected successfully.");
 
     let mut si = STARTUPINFOA::default();
     let mut pi = PROCESS_INFORMATION::default();
@@ -194,7 +328,15 @@ fn inject_main() {
     };
 }
 
+// static mut DLL_NAME: Option<CString> = None;
 static mut DLL_NAME: Option<Vec<CHAR>> = None;
+static mut PROG_NAME: Option<Vec<CHAR>> = None;
+
+// This function is called by DllMain if a process other than rundll32
+// is unloading this DLL.
+fn on_unload() {
+    info_msg("DLL is being unloaded.");
+}
 
 /* public interface below */
 
@@ -210,27 +352,53 @@ pub extern fn inject(_hwnd: HWND, _hinst: HINSTANCE, cmdline: LPCSTR, _cmdshow: 
 }
 
 #[no_mangle]
+pub extern fn enumerate(_hwnd: HWND, _hinst: HINSTANCE, cmdline: LPCSTR, _cmdshow: INT) {
+    let cmdline = unsafe { CStr::from_ptr(cmdline) } .to_string_lossy();
+    let params = cmdline.split(' ').filter(|&s| s != "").collect::<Vec<_>>();
+
+    match do_enum(params) {
+        Ok(_) => {},
+        Err(s) => error_msg(&s.to_string()),
+    };
+}
+
+#[no_mangle]
+pub extern fn unload(_hwnd: HWND, _hinst: HINSTANCE, cmdline: LPCSTR, _cmdshow: INT) {
+    let cmdline = unsafe { CStr::from_ptr(cmdline) } .to_string_lossy();
+    let params = cmdline.split(' ').filter(|&s| s != "").collect::<Vec<_>>();
+
+    match do_unload(params) {
+        Ok(_) => {},
+        Err(s) => error_msg(&s.to_string()),
+    };
+}
+
+#[no_mangle]
 pub extern fn DllMain(hdll: HINSTANCE, fdw_reason: DWORD, _reserved: LPVOID) -> BOOL {
     match fdw_reason {
         DLL_PROCESS_ATTACH => {
-            let mut v = Vec::with_capacity(MAX_PATH);
-            let len = unsafe { GetModuleFileNameA( hdll, v.as_mut_ptr(), MAX_PATH as _) };
-            unsafe { v.set_len(len as usize) };
-            unsafe { DLL_NAME = Some(v) };
+            let mut buf = [0_ as CHAR; MAX_PATH];
+            unsafe { GetModuleFileNameA( hdll, buf.as_mut_ptr().cast(), MAX_PATH as _) };
+	    unsafe { DLL_NAME = Some(Vec::from(&buf[..])); }
 
-            let mut buf = [0 as CHAR; MAX_PATH as _];
-            unsafe { GetModuleFileNameA( null_mut(), buf.as_mut_ptr(), MAX_PATH as _) };
-            let progname = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy();
+            unsafe { GetModuleFileNameA( null_mut(), buf.as_mut_ptr().cast(), MAX_PATH as _) };
+	    unsafe { PROG_NAME = Some(Vec::from(&buf[..])); }
+            let progname = unsafe { CStr::from_ptr(buf.as_ptr().cast()) } .to_str().unwrap();
+
             if !progname.to_lowercase().contains("rundll32") {
-                inject_main();
+                on_load();
             }
         },
-        DLL_THREAD_ATTACH => {
-        }
-        DLL_THREAD_DETACH => {
-        },
         DLL_PROCESS_DETACH => {
+	    let progname = unsafe {
+		CStr::from_ptr(PROG_NAME.as_ref().unwrap().as_ptr())
+	    } .to_str().unwrap();
+            if !progname.to_lowercase().contains("rundll32") {
+                on_unload();
+            }
         },
+        DLL_THREAD_ATTACH => {},
+        DLL_THREAD_DETACH => {},
         _ => {},
     };
     TRUE

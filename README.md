@@ -16,6 +16,18 @@ PS C:\Users\user> rundll32 dumb_inject.dll,inject 8064
 
 If everything went well, a message box informing the user that the "DLL was injected successfully." After that, a `cmd.exe` is launched. Using Process Explorer, we can verify that the `cmd.exe` is a child process of the process we injected the DLL into.
 
+The DLL can be unloaded from the taraget process:
+
+``` console
+PS C:\Users\user> rundll32 dumb_inject.dll,unload 8064
+```
+
+There is also a function to enumerate modules in the target process:
+
+``` console
+PS C:\Users\user> rundll32 dumb_inject.dll,enumerate 8064
+```
+
 ## License
 
 GNU General Public License, version 3
