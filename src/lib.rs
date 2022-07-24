@@ -71,19 +71,11 @@ fn get_sedebug_priv() -> Result<(),Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// idiomatic wrapper around OpenProcess
+/// Somewhat ergonomic wrapper around OpenProcess
 fn open_process(pid: u32) -> Result<HANDLE,Box<dyn std::error::Error>> {
-    let h = unsafe {
-        OpenProcess(
-            PROCESS_ALL_ACCESS,
-            FALSE,
-            pid as _
-        )
-    };
-    if h != null_mut() {
-        Ok(h)
-    } else {
-        Err(get_last_error_string().into())
+    match unsafe { OpenProcess(PROCESS_ALL_ACCESS,  FALSE, pid as _) } {
+	h if h == null_mut() => Err(get_last_error_string().into()),
+	h => Ok(h)
     }
 }
 
@@ -93,6 +85,7 @@ fn get_last_error_string() -> String {
     format_error(r)
 }
 
+/// Somewhat ergonomic wrapper around FormatMessage
 fn format_error(r: DWORD) -> String {
     let mut msg = [0 as CHAR; 256];
     unsafe {
@@ -123,7 +116,7 @@ fn resolve_addr(module: &str, proc: &str) -> Result<FARPROC,Box<dyn std::error::
     Ok(addr)
 }
 
-/// This function is called when the DLL is loaded by rundll32.
+/// This function implements the functionality of the "inject" interface.
 ///
 /// It obtains debug privileges, opens the target process, writes the
 /// DLL path to the target process, and spawns a remote thread that
@@ -168,6 +161,7 @@ fn do_inject(params: Vec<&str>) -> Result<(),Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// This function implements the functionality of the "enumerate" interface.
 fn do_enum(params: Vec<&str>) -> Result<(),Box<dyn std::error::Error>> {
     if params.len() != 1 {
         return Err("usage: <pid>".into());
@@ -222,6 +216,11 @@ fn do_enum(params: Vec<&str>) -> Result<(),Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// This function implements the functionality of the "unload" interface.
+///
+/// It looks for modules in the target process whose filename is equal
+/// to its own filename. If such a module is found, it spawns a remote
+/// threrad that calls FreeLibrary on the module handle.
 fn do_unload(params: Vec<&str>) -> Result<(),Box<dyn std::error::Error>> {
     if params.len() != 1 {
         return Err("usage: <pid>".into());
@@ -295,14 +294,14 @@ fn do_unload(params: Vec<&str>) -> Result<(),Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// This function gets called by DllMain if a process other than
-// rundll32 has loaded htis DLL.
-//
-// At this point we can pretty much do anything, for example create
-// long-running threads.
-//
-// Let's just tell the user that everything went well and provide him
-// with a cmd.exe.
+/// This function gets called by DllMain if a process other than
+/// rundll32 has loaded htis DLL.
+///
+/// At this point we can pretty much do anything, for example create
+/// long-running threads.
+///
+/// Let's just tell the user that everything went well and provide
+/// them with a cmd.exe.
 fn on_load() {
     info_msg("DLL was injected successfully.");
 
@@ -323,12 +322,11 @@ fn on_load() {
     };
 }
 
-// static mut DLL_NAME: Option<CString> = None;
 static mut DLL_NAME: Option<Vec<CHAR>> = None;
 static mut PROG_NAME: Option<Vec<CHAR>> = None;
 
-// This function is called by DllMain if a process other than rundll32
-// is unloading this DLL.
+/// This function is called by DllMain if a process other than
+/// rundll32 (i.e. the target process) is unloading this DLL.
 fn on_unload() {
     info_msg("DLL is being unloaded.");
 }
@@ -397,13 +395,4 @@ pub extern fn DllMain(hdll: HINSTANCE, fdw_reason: DWORD, _reserved: LPVOID) -> 
         _ => {},
     };
     TRUE
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        let result = 2 + 2;
-        assert_eq!(result, 4);
-    }
 }
