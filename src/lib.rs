@@ -3,7 +3,7 @@
 extern crate winapi;
 
 use std::ffi::{CStr,CString};
-
+use std::path::Path;
 use std::ptr::null_mut;
 
 use winapi::shared::{minwindef::*,
@@ -19,6 +19,22 @@ use winapi::um::{errhandlingapi::*,
                  memoryapi::*,
                  securitybaseapi::*};
 
+fn msg_title() -> CString {
+    let dll_name = unsafe { CStr::from_ptr(DLL_NAME.as_ref().unwrap().as_ptr()) }
+    .to_string_lossy();
+    let prog_name = unsafe { CStr::from_ptr(PROG_NAME.as_ref().unwrap().as_ptr()) }
+    .to_string_lossy();
+
+    let dll_name = Path::new(dll_name.as_ref()).to_path_buf();
+    let prog_name = Path::new(prog_name.as_ref()).to_path_buf();
+
+    CString::new(
+	format!("{} ({})",
+		dll_name.file_name().unwrap().to_string_lossy(),
+		prog_name.file_name().unwrap().to_string_lossy())
+    ).unwrap()
+}
+
 /// Show error-themed message box
 fn error_msg(s: &str) {
     let msg = CString::new(s).unwrap();
@@ -26,7 +42,7 @@ fn error_msg(s: &str) {
         MessageBoxA(
             null_mut(),
             msg.as_ptr(),
-            DLL_NAME.as_ref().unwrap().as_ptr(),
+            msg_title().as_ptr(),
             MB_ICONERROR | MB_OK
         );
     }
@@ -39,7 +55,7 @@ fn info_msg(s: &str) {
         MessageBoxA(
             null_mut(),
             msg.as_ptr(),
-            DLL_NAME.as_ref().unwrap().as_ptr(),
+            msg_title().as_ptr(),
             MB_ICONINFORMATION | MB_OK
         );
     }
@@ -376,8 +392,8 @@ pub extern fn DllMain(hdll: HINSTANCE, fdw_reason: DWORD, _reserved: LPVOID) -> 
 
             unsafe { GetModuleFileNameA( null_mut(), buf.as_mut_ptr().cast(), MAX_PATH as _) };
 	    unsafe { PROG_NAME = Some(Vec::from(&buf[..])); }
-            let progname = unsafe { CStr::from_ptr(buf.as_ptr().cast()) } .to_str().unwrap();
 
+            let progname = unsafe { CStr::from_ptr(buf.as_ptr().cast()) } .to_str().unwrap();
             if !progname.to_lowercase().contains("rundll32") {
                 on_load();
             }
